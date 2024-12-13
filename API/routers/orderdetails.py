@@ -1,89 +1,65 @@
-from fastapi import APIRouter, HTTPException, Depends, Request
-from pydantic import BaseModel
-from datetime import datetime
+from fastapi import APIRouter, HTTPException, Request
 import database
-from routers.auth import get_current_active_user
+import logging
 
-router = APIRouter(dependencies=[Depends(get_current_active_user)])
+# Initialize Logger
+logger = logging.getLogger(__name__)
 
-# Pydantic Models for Order and Details
-class PurchaseOrder(BaseModel):
-    orderID: int
-    orderDate: datetime
-    orderStatus: str
-    statusDate: datetime
-    vendorID: int
+# Initialize Router
+router = APIRouter()
 
-class PurchaseOrderDetail(BaseModel):
-    orderDetailID: int
-    orderID: int
-    orderQuantity: int
-    expectedDate: datetime
-    actualDate: datetime = None
-    productID: int
-
-class OrderWithDetails(BaseModel):
-    order: PurchaseOrder
-    details: list[PurchaseOrderDetail]
-
-# Endpoint to get purchase order with its details
-@router.get("/orders/{order_id}", response_model=OrderWithDetails)
-async def get_order_with_details(order_id: int):
-    conn = await database.get_db_connection()
-    try:
-        async with conn.cursor() as cursor:
-            # Fetch the purchase order data
-            await cursor.execute(
-                '''
-                SELECT orderID, orderDate, orderStatus, statusDate, vendorID
-                FROM purchaseOrders
-                WHERE orderID = ?;
-                ''',
-                (order_id,),
-            )
-            order_row = await cursor.fetchone()
-            if not order_row:
-                raise HTTPException(status_code=404, detail="Purchase order not found")
-
-            order = dict(zip([column[0] for column in cursor.description], order_row))
-
-            # Fetch the details for the order
-            await cursor.execute(
-                '''
-                SELECT orderDetailID, orderID, orderQuantity, expectedDate, actualDate, productID
-                FROM purchaseOrderDetails
-                WHERE orderID = ?;
-                ''',
-                (order_id,),
-            )
-            details_rows = await cursor.fetchall()
-            details = [
-                dict(zip([column[0] for column in cursor.description], row))
-                for row in details_rows
-            ]
-
-            return {
-                "order": order,
-                "details": details,
-            }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        await conn.close()
-
-# Webhook to receive IMS notifications (example: when a new order is created in IMS)
-@router.post("/webhook/new-order")
+# Webhook to receive IMS order data using GET method
+@router.get("/webhook/new-order")
 async def webhook_new_order(request: Request):
     try:
-        payload = await request.json()
+        # Extract data from query parameters sent by IMS
+        productID = request.query_params.get('productID')
+        productName = request.query_params.get('productName')
+        productDescription = request.query_params.get('productDescription')
+        size = request.query_params.get('size')
+        color = request.query_params.get('color')
+        category = request.query_params.get('category')
+        quantity = request.query_params.get('quantity')
+        vendorID = request.query_params.get('vendorID')
+        orderDate = request.query_params.get('orderDate')
+        expectedDate = request.query_params.get('expectedDate')
 
-        # Log the incoming payload (you can modify this to just log or process without storing)
-        print(f"Received webhook data: {payload}")
+        # Log received parameters for debugging
+        logger.info(f"Received parameters: {request.query_params}")
 
-        # Optionally, you can log or perform actions based on this data
-        # But since you're not inserting into your DB, we don't need to save it.
+        # Validate the required data
+        if not productID or not productName or not productDescription or not size or not color:
+            raise HTTPException(status_code=400, detail="Missing required query parameters")
+
+        # Insert data into the purchaseOrders table in VMS
+        conn = await database.get_db_connection()
+        cursor = await conn.cursor()
+
+        # Insert the new order into the database
+        await cursor.execute(
+            '''
+            INSERT INTO purchaseOrders (orderDate, orderStatus, vendorID)
+            VALUES (?, ?, ?);
+            ''',
+            (orderDate, "Pending", vendorID)
+        )
+        orderID = cursor.lastrowid  # Get the last inserted orderID
         
-        # Just return a confirmation message.
-        return {"message": "Webhook received and processed successfully"}
+        # Insert order details into purchaseOrderDetails table
+        await cursor.execute(
+            '''
+            INSERT INTO purchaseOrderDetails (orderID, productID, orderQuantity, expectedDate)
+            VALUES (?, ?, ?, ?);
+            ''',
+            (orderID, productID, quantity, expectedDate)
+        )
+
+        # Commit the transaction and close the connection
+        await conn.commit()
+        await conn.close()
+
+        return {"message": "Purchase order received and processed successfully", "orderID": orderID}
+
     except Exception as e:
+        logger.error(f"Error processing webhook: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error processing webhook: {str(e)}")

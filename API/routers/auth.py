@@ -200,12 +200,13 @@ class Product(BaseModel):
     maxStockLevel: int = 0
     quantity: int # number of variants to addd
     quantity: int =1 # number of variants to addd
+    isActive: bool = True
 
 class ProductInDB(Product):
     productID: int
     createdAt: str = None
     lastUpdated: str = None
-    isActive: bool = True
+    
 class AddQuantity(BaseModel):
     productName: str
     quantity: int
